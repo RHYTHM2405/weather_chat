@@ -54,7 +54,7 @@ It provides travel ideas, recommendations, and images of attractions based on yo
 | **Image Search** | Unsplash API |
 | **Location Detection** | Nominatim (OpenStreetMap) |
 | **Persistence** | Browser Local Storage |
-| **Future DB (for login)** | SQLite / Firebase (planned) |
+| **Future DB (for login)** | PostgreSQL|
 
 ---
 
