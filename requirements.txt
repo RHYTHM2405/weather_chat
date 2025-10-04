@@ -1,0 +1,8 @@
+Flask>=3.0,<4.0
+requests
+python-dotenv
+faster-whisper
+soundfile
+pydub
+numpy
+streamlit-webrtc==0.55.0   # if you reuse Streamlit mic code
