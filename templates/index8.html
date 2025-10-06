@@ -1,0 +1,1075 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>WeatherChat — Chat UI (persist, streaming, location, STT lang)</title>
+  <style>
+    :root{
+      --accent:#0b84ff; --muted:#6b6b75; --card-bg: rgba(255,255,255,0.82);
+      --page-transition: 2s ease-in-out;
+      --intro-slide-duration: 2000ms;
+      --intro-typing-cps: 10; /* chars per second */
+    }
+    html,body{height:100%;margin:0;}
+    body{
+      font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+      display:flex; align-items:flex-start; justify-content:center;
+      padding:28px; min-height:100vh; background: linear-gradient(180deg,#F7F8FB,#EEF2FF);
+      transition: background var(--page-transition);
+      overflow-x: hidden;
+    }
+
+    /* ---------- INTRO (slide + typing) ---------- */
+    /* Full-screen intro container sits above content on load */
+    #intro {
+      position: fixed;
+      inset: 0;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      z-index:2000;
+      pointer-events: none; /* doesn't block keyboard as typing is animated only */
+      background: transparent;
+    }
+    /* sliding colored bar that moves right -> left revealing itself */
+    .intro-slide {
+      position: absolute;
+      inset: 0;
+      transform: translateX(100%); /* start off-screen to the right */
+      /* gradient color you can tweak */
+      background: linear-gradient(90deg, rgba(11,132,255,1) 0%, rgba(11,132,255,0.9) 40%, rgba(11,132,255,0.55) 100%);
+      will-change: transform;
+      z-index: 2010;
+    }
+    /* shrink the slide to a bar for a cleaner effect (adjust height as needed) */
+    .intro-slide .bar {
+      position: absolute;
+      left: 0; right: 0;
+      height: 100%;
+      width: 100%;
+      top: 0;
+    }
+
+    /* text area above the slide where the typing name appears */
+    .intro-content {
+      position: relative;
+      z-index: 2020;
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      gap:12px;
+      pointer-events:none;
+      color: white;
+      text-shadow: 0 4px 24px rgba(0,0,0,0.35);
+      transform: translateY(-6px);
+      opacity: 0;
+    }
+    /* the visible app name area (typing target) */
+    #introTitle {
+      font-size: clamp(20px, 4vw, 36px);
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      white-space: nowrap;
+      display:inline-block;
+      min-width: 8ch;
+      color: #fff;
+    }
+    /* caret (blinking) implemented with pseudo-element */
+    #introTitle.caret::after {
+      content: '';
+      display:inline-block;
+      width: 2px;
+      height: 1.05em;
+      margin-left: 6px;
+      background: rgba(255,255,255,0.95);
+      vertical-align: middle;
+      animation: caret-blink 900ms steps(1) infinite;
+    }
+    @keyframes caret-blink { 50% { opacity: 0 } }
+
+    /* intro fade in for text content */
+    .intro-content.show { animation: introContentFade 220ms ease forwards; }
+    @keyframes introContentFade { from { opacity:0; transform: translateY(6px) } to { opacity:1; transform: translateY(0) } }
+
+    /* slide animation class — uses transition so we can easily await 'transitionend' */
+    .intro-slide.animate { transform: translateX(0%); transition: transform var(--intro-slide-duration) cubic-bezier(.2,.9,.25,1); }
+
+    /* After finished, intro will fade out */
+    #intro.fadeout { animation: introFadeOut 350ms ease forwards; pointer-events: none; }
+    @keyframes introFadeOut { to { opacity: 0; visibility: hidden } }
+
+    /* ---------- hide main site until intro completes ---------- */
+    .hidden-onload { opacity: 0; pointer-events: none; transform: translateY(6px); filter: blur(2px); transition: opacity 350ms ease, transform 350ms ease, filter 350ms ease; }
+    .revealed { opacity: 1; pointer-events: auto; transform: translateY(0); filter: blur(0); transition: opacity 350ms ease, transform 350ms ease, filter 350ms ease; }
+
+    /* rest of your styles unchanged... */
+    .wrap{width:100%; max-width:1180px; background:var(--card-bg); border-radius:12px; padding:20px; box-sizing:border-box; box-shadow:0 10px 38px rgba(20,20,40,0.06); display:grid; grid-template-rows:auto 1fr auto; gap:10px; height:82vh}
+    header{display:flex;align-items:center;justify-content:space-between;gap:12px}
+    h1{margin:0;font-size:18px}
+    .controls{display:flex;gap:8px;align-items:center}
+    .small{font-size:13px;color:var(--muted)}
+
+    /* control elements */
+    select, button, input[type="text"] { font-family:inherit; }
+    button { cursor:pointer; }
+    .btn { padding:8px 10px; border-radius:8px; border:none; background:var(--accent); color:#fff; font-weight:600 }
+    .btn.ghost { background: transparent; color:var(--muted); border:1px solid rgba(16,24,40,0.06) }
+
+    /* Stylish select (STT) */
+    .select-wrapper {
+    position: relative;
+    display: inline-block;
+    vertical-align: middle;
+    line-height: 1;
+    }
+
+    /* Base select appearance */
+    .select-wrapper select {
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    padding: 8px 36px 8px 12px; /* left padding for text, right padding for arrow space */
+    border-radius: 10px;
+    border: 1px solid rgba(16,24,40,0.06);
+    background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(250,250,252,0.98));
+    box-shadow: 0 6px 18px rgba(12,12,20,0.04);
+    font-family: inherit;
+    font-size: 13px;
+    color: #0b1826;
+    min-width: 110px;
+    cursor: pointer;
+    transition: box-shadow 200ms ease, transform 160ms ease, border-color 200ms ease;
+    outline: none;
+    }
+
+    /* subtle hover & active */
+    .select-wrapper select:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 10px 28px rgba(12,12,20,0.06);
+    }
+    .select-wrapper select:active {
+    transform: translateY(0);
+    }
+
+    /* focus ring for accessibility */
+    .select-wrapper select:focus {
+    box-shadow: 0 10px 28px rgba(11,132,255,0.14);
+    border-color: rgba(11,132,255,0.28);
+    }
+
+    /* custom arrow using inline SVG (keeps crisp on high-dpi) */
+    .select-wrapper::after {
+    content: "";
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 18px;
+    height: 18px;
+    pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none'%3E%3Cpath d='M6 8.5l4 4 4-4' stroke='%230b84ff' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: center;
+    opacity: 0.95;
+    }
+
+    /* darken arrow color on focus */
+    .select-wrapper select:focus ~ ::after { opacity: 1; }
+
+    /* small screens: make select full width */
+    @media (max-width: 640px) {
+    .select-wrapper { width: 140px; }
+    .select-wrapper select { min-width: 100%; }
+    }
+
+
+    /* conversation */
+    .conversation { background: rgba(255,255,255,0.55); border-radius:8px; padding:12px; overflow:auto; display:flex; flex-direction:column; gap:12px; }
+    .row { display:flex; }
+    .msg { max-width:78%; padding:10px 12px; border-radius:14px; box-shadow:0 6px 18px rgba(12,12,20,0.04); line-height:1.35 }
+    .msg.user { margin-left:auto; background:#e6f3ff; border-bottom-right-radius:6px; }
+    .msg.assistant { margin-right:auto; background:#fff; border-bottom-left-radius:6px; display:flex; gap:8px; align-items:flex-start; }
+    .msg .metaSmall { font-size:12px; color:var(--muted); margin-bottom:6px }
+    .bubble-text { white-space:pre-wrap; color:#111 }
+
+    /* bottom bar */
+    .chatbar { display:flex; gap:8px; align-items:center; }
+    .inputwrap { flex:1; position:relative; }
+    #userInput { width:100%; padding:12px 54px 12px 14px; border-radius:10px; border:1px solid rgba(16,24,40,0.06); font-size:15px; box-sizing:border-box; background: rgba(255,255,255,0.94); }
+    .righticons { position:absolute; right:8px; top:7px; display:flex; gap:8px; align-items:center; }
+    .micbtn { width:36px; height:36px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; border:1px solid rgba(16,24,40,0.06); background:#fff; }
+    .micbtn.recording { background: linear-gradient(135deg,#ff6b6b,#ff3b3b); color:#fff; border-color:#ff3b3b; }
+    .enterbtn { padding:10px 14px; background:var(--accent); color:white; border:none; border-radius:8px; cursor:pointer; font-weight:600; }
+
+    /* spinner */
+    .spinner { border: 4px solid rgba(0,0,0,0.06); border-top: 4px solid var(--accent); border-radius:50%; width:22px; height:22px; animation: spin 1s linear infinite; margin-left:8px }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+    /* weather icon */
+    .weather-icon { width:30px; height:30px; display:inline-flex; align-items:center; justify-content:center; font-size:18px }
+
+    .sidebar-wrap {
+    position: fixed;
+    left: 0;
+    top: 0;
+    height: 100vh;
+    width: 260px;
+    transform: translateX(-100%);
+    transition: transform 320ms cubic-bezier(.2,.8,.2,1);
+    z-index: 1200;
+    box-shadow: 6px 0 24px rgba(10,10,20,0.08);
+    background: linear-gradient(180deg,#ffffff, #f7f8fb);
+    padding: 18px;
+    box-sizing: border-box;
+    border-right: 1px solid rgba(16,24,40,0.04);
+    display:flex;
+    flex-direction:column;
+    gap:14px;
+    }
+    .sidebar-wrap.open { transform: translateX(0%); }
+
+    .sidebar-header { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+    .sidebar-title {
+        font-weight:700;
+        font-size:16px;
+        flex:1;
+        text-align:center;   /* ✅ centers the word 'Project' */
+        }
+    .sidebar-close { background:transparent; border:1px solid rgba(16,24,40,0.06); padding:6px 8px; border-radius:8px; cursor:pointer; }
+
+    .sidebar-list { display:flex; flex-direction:column; gap:8px; margin-top:6px; }
+    .sidebar-item { display:flex; gap:10px; align-items:center; padding:10px; border-radius:8px; cursor:pointer; text-decoration:none; color:inherit; border:1px solid transparent; transition:background 140ms, border-color 140ms; }
+    .sidebar-item:hover { background: rgba(11,132,255,0.06); border-color: rgba(11,132,255,0.08); }
+
+    .sidebar-foot { margin-top:auto; font-size:12px; color:var(--muted); }
+
+    /* overlay to dim when open */
+    .sidebar-overlay {
+    position: fixed; inset: 0; background: rgba(4,6,10,0.18); z-index: 1100; opacity:0; pointer-events:none; transition: opacity 220ms;
+    }
+    .sidebar-overlay.show { opacity:1; pointer-events:auto; }
+
+    /* small floating open button when sidebar closed */
+    .sidebar-open-btn {
+    position: fixed;
+    left: 10px;
+    top: 14px;
+    z-index: 1250;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    padding: 8px 10px;
+    border-radius: 999px;
+    box-shadow: 0 6px 18px rgba(11,132,255,0.16);
+    cursor: pointer;
+    display: none; /* shown on small screens via JS */
+    }
+
+    /* workflow modal */
+    .workflow-modal {
+    position: fixed; inset: 0; display:flex; align-items:center; justify-content:center; z-index:1300;
+    pointer-events:none;
+    }
+    .workflow-modal .card {
+    width: 90%; max-width:840px; background:#fff; border-radius:12px; padding:18px; box-shadow:0 22px 60px rgba(8,10,20,0.16);
+    transform: translateY(8px); opacity:0; transition: transform 220ms, opacity 220ms;
+    pointer-events:auto;
+    }
+    .workflow-modal.show .card { transform: translateY(0); opacity:1; }
+    .workflow-modal .close { position:absolute; right:20px; top:20px; background:transparent; border:none; cursor:pointer; color:var(--muted); }
+
+    /* responsive tweak: show floating open button on small screens */
+    @media (max-width:880px){
+    .sidebar-wrap { width: 84vw; }
+    .sidebar-open-btn { display: inline-flex; }
+    }
+    /* dynamic backgrounds */
+
+    .bg-sunny { background: linear-gradient(180deg,#FFEEAD 0%, #FFD166 100%); }
+    .bg-rainy { background: linear-gradient(180deg,#D7EFFF 0%, #8EC5FF 100%); }
+    .bg-cloudy { background: linear-gradient(180deg,#E6E9EE 0%, #BFC3CC 100%); }
+    .bg-other { background: linear-gradient(180deg,#F7F8FB 0%, #E6EEFF 100%); }
+
+    /* assistant fade-in */
+    .msg.assistant.fade-in { animation: fadeInUp 250ms ease both; }
+    @keyframes fadeInUp { from { opacity:0; transform: translateY(6px) } to { opacity:1; transform: translateY(0) } }
+
+    /* responsive */
+    @media (max-width:640px){
+      .wrap { height:90vh; padding:10px }
+      .msg { max-width:86% }
+    }
+
+    /* ---------------- RIGHT SIDEBAR (LOGIN PANEL) ---------------- */
+    .right-sidebar {
+      position: fixed;
+      top: 0;
+      right: 0;
+      height: 100vh;
+      width: 320px;
+      background: linear-gradient(180deg, #ffffff, #f7f8fb);
+      box-shadow: -6px 0 24px rgba(10,10,20,0.08);
+      border-left: 1px solid rgba(16,24,40,0.04);
+      padding: 20px;
+      box-sizing: border-box;
+      z-index: 1400;
+      transform: translateX(100%);
+      transition: transform 0.35s cubic-bezier(.2,.8,.2,1);
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    .right-sidebar.open { transform: translateX(0%); }
+
+    .right-sidebar-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .login-form {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .login-form label {
+      font-size: 14px;
+      font-weight: 500;
+      color: #222;
+    }
+
+    .login-form input {
+      padding: 10px;
+      border-radius: 8px;
+      border: 1px solid rgba(16,24,40,0.08);
+      font-size: 14px;
+      outline: none;
+    }
+
+    .login-form input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(11,132,255,0.15);
+    }
+
+    .google-login button:hover {
+      background: #f7f7f7 !important;
+    }
+
+  </style>
+</head>
+<body>
+    <!-- INTRO: slide + typing -->
+    <div id="intro" aria-hidden="true">
+      <div class="intro-slide" id="introSlide" aria-hidden="true">
+        <div class="bar"></div>
+      </div>
+
+      <div class="intro-content" id="introContent" role="img" aria-label="WeatherChat startup">
+        <div id="introTitle" aria-hidden="true" class="caret"></div>
+        <div id="introSubtitle" style="font-size:13px; opacity:0.9">Travel suggestions powered by weather + LLM</div>
+      </div>
+    </div>
+
+    <!-- SIDEBAR + OVERLAY -->
+<button id="sidebarOpenBtn" class="sidebar-open-btn" title="Open menu">☰</button>
+
+<div id="sidebar" class="sidebar-wrap" aria-hidden="true">
+  <div class="sidebar-header">
+    <div class="sidebar-title">Project</div>
+    <button id="sidebarClose" class="sidebar-close" aria-label="Close sidebar">✕</button>
+  </div>
+
+  <div class="sidebar-list" role="menu" aria-label="Project menu">
+    <!-- GitHub -->
+    <a id="githubLink" class="sidebar-item" role="menuitem" href="https://github.com/YOUR_USERNAME" target="_blank" rel="noopener noreferrer">
+      <span>🐙</span>
+      <span>GitHub</span>
+    </a>
+
+    <!-- Demo -->
+    <a id="demoLink" class="sidebar-item" role="menuitem" href="https://drive.google.com/drive/folders/YOUR_VIDEO_LINK" target="_blank" rel="noopener noreferrer">
+      <span>▶️</span>
+      <span>Demo video</span>
+    </a>
+
+    <!-- Workflow (opens modal) -->
+    <button id="workflowBtn" class="sidebar-item" role="menuitem" aria-haspopup="dialog">
+      <span>🧭</span>
+      <span>Workflow</span>
+    </button>
+  </div>
+
+  <div class="sidebar-foot">V1.1 • Developed by Rhythm For ATF</div>
+</div>
+
+<div id="sidebarOverlay" class="sidebar-overlay" aria-hidden="true"></div>
+
+<!-- WORKFLOW MODAL -->
+<div id="workflowModal" class="workflow-modal" aria-hidden="true">
+  <div class="card" role="dialog" aria-modal="true" aria-labelledby="workflowTitle">
+    <button id="workflowClose" class="close" aria-label="Close">&times;</button>
+    <h2 id="workflowTitle">Project Workflow</h2>
+    <div id="workflowContent" style="margin-top:12px; color:#222; line-height:1.5; font-size:14px;">
+      <!-- You can replace or expand this text with the workflow you want to show -->
+      <p><strong>1. Input:</strong> User types a prompt or records voice (Japanese/English). The frontend captures text or audio.</p>
+      <p><strong>2. STT:</strong> Audio is uploaded to Deepgram (or chosen cloud STT) and returned as text. The language toggle directs STT language detection.</p>
+      <p><strong>3. City extraction:</strong> The server asks the LLM to extract a city name from the prompt. If none found, the LLM produces a general answer.</p>
+      <p><strong>4. Weather:</strong> If a city is found, the server queries Open-Meteo geocoding + forecast to get current weather and temperature.</p>
+      <p><strong>5. LLM generation:</strong> The server sends the original prompt + concise weather facts to the LLM and requests structured JSON output (sections/items).</p>
+      <p><strong>6. Images:</strong> For each suggested place the server queries Unsplash (cached) to attach a thumbnail & attribution.</p>
+      <p><strong>7. Delivery:</strong> The server streams the structured answer to the client (SSE-like), the frontend renders the markdown and images, and updates background gradients based on weather.</p>
+
+    <div style="margin-top:16px; display:flex; justify-content:center;">
+    <img id="workflowImg"
+         src="./workflow-illustration.png"
+         alt="Workflow diagram"
+         style="max-width:100%; height:auto; border-radius:8px; box-shadow:0 12px 30px rgba(8,10,20,0.08);" />
+  </div>
+    </div>
+  </div>
+</div>
+
+  <div class="wrap hidden-onload" role="main" id="mainWrap" aria-hidden="true">
+    <header>
+      <div>
+        <h1>WeatherChat</h1>
+        <div class="small">Travel suggestions powered by weather + LLM</div>
+      </div>
+
+      <div class="controls">
+        <!-- Language toggle for STT -->
+        <label class="small">STT:</label>
+        <div class="select-wrapper">
+        <select id="sttLang" title="STT language (auto, en, ja)" aria-label="STT language">
+            <option value="auto">Auto</option>
+            <option value="en">English</option>
+            <option value="ja">Japanese</option>
+        </select>
+        </div>
+
+        <!-- Login / Register button -->
+        <button id="loginOpenBtn" class="btn ghost" title="Open login sidebar">Login / Register</button>
+
+        <!-- Location button -->
+        <button id="locBtn" class="btn ghost" title="Detect my city">📍 Detect city</button>
+
+        <!-- Clear chat -->
+        <button id="clearBtn" class="btn ghost" title="Clear conversation">Clear chat</button>
+      </div>
+    </header>
+
+    <section id="conversation" class="conversation" aria-live="polite"></section>
+
+    <div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <div id="statusSmall" class="small">Ready</div>
+      </div>
+
+      <div class="chatbar">
+        <div class="inputwrap">
+          <input id="userInput" type="text" placeholder="e.g. What should I do in Kyoto today?" aria-label="Message input"/>
+          <div class="righticons">
+            <button id="micBtn" class="micbtn" title="Start/stop recording" aria-label="Toggle microphone">🎤</button>
+          </div>
+        </div>
+        <button id="enterBtn" class="enterbtn">Enter</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" style="position:fixed;right:18px;bottom:18px;z-index:9999"></div>
+
+  <!-- RIGHT SIDEBAR (LOGIN) -->
+  <div id="rightSidebar" class="right-sidebar" aria-hidden="true">
+    <div class="right-sidebar-header">
+      <h2>Login</h2>
+      <button id="rightSidebarClose" class="sidebar-close" aria-label="Close login panel">✕</button>
+    </div>
+
+    <form class="login-form" onsubmit="return false;">
+      <label for="username">Username</label>
+      <input id="username" type="text" placeholder="Enter username" required />
+
+      <label for="password">Password</label>
+      <input id="password" type="password" placeholder="Enter password" required />
+
+      <button class="btn" type="submit">Login</button>
+      <button class="btn ghost" type="button" id="registerBtn">Register as new user</button>
+
+      <div class="google-login">
+        <button id="googleLoginBtn" type="button" class="btn" style="background:#fff;color:#333;display:flex;align-items:center;gap:8px;justify-content:center;border:1px solid #ddd;">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 488 512" width="18" height="18"><path fill="#EA4335" d="M488 261.8c0-17.4-1.6-34.1-4.6-50.4H249v95.3h134.3c-5.8 31-23.3 57.3-49.6 75v62.4h80.1c46.9-43.2 73.2-106.9 73.2-182.3z"/><path fill="#34A853" d="M249 492c66.5 0 122.3-22 162.9-59.9l-80.1-62.4c-22.3 15-50.9 23.9-82.8 23.9-63.7 0-117.8-42.9-137.2-100.4H29.6v63.4C69.7 439.4 153.5 492 249 492z"/><path fill="#4A90E2" d="M111.8 293.3c-9.7-28.8-9.7-60.2 0-89l.1-.5V140.4H29.6c-19.6 38.4-30.8 81.8-30.8 128s11.2 89.6 30.8 128h82.2v-63.4l-.1-.7z"/><path fill="#FBBC05" d="M249 97.7c35.9 0 68.2 12.4 93.7 36.6l70.1-70.1C371.3 26.3 315.5 0 249 0 153.5 0 69.7 52.6 29.6 140.4l82.3 63.4C131.2 140.6 185.3 97.7 249 97.7z"/></svg>
+          <span>Sign in with Google</span>
+        </button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Overlay for dimming background -->
+  <div id="rightSidebarOverlay" class="sidebar-overlay" aria-hidden="true"></div>
+
+<script>
+/* ---------------- utilities ---------------- */
+const toastRoot = document.getElementById('toast');
+
+function createPlaceImage(imgMeta) {
+  const wrap = document.createElement('div');
+  wrap.style.display = 'flex';
+  wrap.style.flexDirection = 'column';
+  wrap.style.gap = '6px';
+  wrap.style.marginTop = '6px';
+  const placeholder = document.createElement('div');
+  placeholder.style.width = '200px';
+  placeholder.style.height = '120px';
+  placeholder.style.borderRadius = '8px';
+  placeholder.style.background = 'linear-gradient(90deg, #f0f0f0, #e8e8e8)';
+  placeholder.style.display = 'flex';
+  placeholder.style.alignItems = 'center';
+  placeholder.style.justifyContent = 'center';
+  placeholder.textContent = 'Loading...';
+  wrap.appendChild(placeholder);
+  const img = document.createElement('img');
+  img.src = imgMeta.thumbnail || imgMeta.url;
+  img.alt = imgMeta.title || 'Image';
+  img.loading = 'lazy';
+  img.style.width = '200px';
+  img.style.maxWidth = '100%';
+  img.style.height = 'auto';
+  img.style.borderRadius = '8px';
+  img.style.objectFit = 'cover';
+  img.style.display = 'none';
+  img.addEventListener('load', () => {
+    try { placeholder.replaceWith(img); } catch(e){ /* ignore */ }
+    img.style.display = 'block';
+  });
+  img.addEventListener('error', () => {
+    console.warn('Image load failed for', img.src);
+    if (!img.dataset.triedProxy && imgMeta.url) {
+      img.dataset.triedProxy = "1";
+      img.src = '/api/image_proxy?url=' + encodeURIComponent(imgMeta.url);
+      return;
+    }
+    placeholder.textContent = 'Image not available';
+  });
+  if (imgMeta.source_page) {
+    img.style.cursor = 'pointer';
+    img.addEventListener('click', () => { window.open(imgMeta.source_page, '_blank'); });
+  }
+  const credit = document.createElement('div');
+  credit.className = 'small';
+  credit.style.fontSize = '11px';
+  credit.style.color = '#666';
+  credit.textContent = imgMeta.attribution || '';
+  wrap.appendChild(credit);
+  return wrap;
+}
+
+function showToast(msg, dur=3000){
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = msg;
+  el.style.background='#111'; el.style.color='#fff'; el.style.padding='8px 12px'; el.style.borderRadius='8px';
+  toastRoot.appendChild(el);
+  setTimeout(()=>{ el.style.opacity='0'; setTimeout(()=>el.remove(),300); }, dur);
+}
+function normalizeMarkdown(s) {
+  if (!s && s !== "") return s;
+  s = String(s || "");
+  s = s.replace(/\r\n/g, "\n");
+  s = s.split("\n").map(line => line.replace(/[ \t]+$/g, "")).join("\n");
+  s = s.replace(/\n{3,}/g, "\n\n");
+  s = s.replace(/([a-z0-9\u00C0-\u017F])\n([a-z0-9\u00C0-\u017F])/g, "$1 $2");
+  s = s.replace(/^\s+/, "").replace(/\s+$/, "");
+  return s;
+}
+
+/* ---------------- state & elements ---------------- */
+const conversationEl = document.getElementById('conversation');
+const userInput = document.getElementById('userInput');
+const enterBtn = document.getElementById('enterBtn');
+const micBtn = document.getElementById('micBtn');
+const clearBtn = document.getElementById('clearBtn');
+const locBtn = document.getElementById('locBtn');
+const sttLang = document.getElementById('sttLang');
+const statusSmall = document.getElementById('statusSmall');
+
+let mediaRecorder = null;
+let recordedChunks = [];
+let isRecording = false;
+
+/* ---------------- localStorage chat persistence ---------------- */
+const STORAGE_KEY = "weatherchat_history_v1";
+
+function loadHistory(){
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [];
+  } catch(e){
+    console.error("loadHistory err", e);
+    return [];
+  }
+}
+function saveHistory(messages){
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(messages));
+  } catch(e){ console.error("saveHistory err", e); }
+}
+function appendToHistory(msg){
+  const h = loadHistory();
+  h.push(msg); saveHistory(h);
+}
+function clearHistory(){
+  localStorage.removeItem(STORAGE_KEY);
+}
+
+/* ---------------- helper: render conversation ---------------- */
+function clearConversationDOM(){
+  conversationEl.innerHTML = "";
+}
+function renderHistory(){
+  clearConversationDOM();
+  const h = loadHistory();
+  h.forEach(m => renderMessage(m, false));
+  conversationEl.scrollTop = conversationEl.scrollHeight;
+}
+
+function renderMessage(msg, animate = true) {
+  const el = document.createElement('div');
+  el.className = 'msg ' + (msg.role === 'user' ? 'user' : 'assistant');
+  if (msg.role === 'assistant') el.classList.add('assistant');
+  if (msg.role === 'assistant' && animate) el.classList.add('fade-in');
+
+  if (msg.role === 'assistant') {
+    const container = document.createElement('div');
+    container.style.display = 'flex';
+    container.style.flexDirection = 'column';
+    container.style.gap = '6px';
+    const topRow = document.createElement('div');
+    topRow.style.display = 'flex';
+    topRow.style.gap = '8px';
+    topRow.style.alignItems = 'flex-start';
+    const icon = document.createElement('div');
+    icon.className = 'weather-icon';
+    icon.innerHTML = getWeatherIcon(msg.weather && msg.weather.condition);
+    topRow.appendChild(icon);
+    const inner = document.createElement('div');
+    inner.className = 'bubble-text';
+    try {
+      const sourceMarkdown = (typeof normalizeMarkdown === 'function') ? normalizeMarkdown(msg.content || '') : (msg.content || '');
+      const rawHtml = (typeof marked !== 'undefined') ? marked.parse(sourceMarkdown) : (sourceMarkdown.replace(/\n/g, '<br/>'));
+      const safeHtml = (typeof DOMPurify !== 'undefined') ? DOMPurify.sanitize(rawHtml) : rawHtml;
+      inner.innerHTML = safeHtml;
+    } catch (e) {
+      inner.textContent = msg.content || '';
+    }
+    topRow.appendChild(inner);
+    container.appendChild(topRow);
+    if (msg.image && (msg.image.thumbnail || msg.image.url)) {
+      const imgNode = createPlaceImage(msg.image);
+      container.appendChild(imgNode);
+    }
+    el.appendChild(container);
+  } else {
+    const inner = document.createElement('div');
+    inner.className = 'bubble-text';
+    inner.textContent = msg.content;
+    el.appendChild(inner);
+  }
+
+  conversationEl.appendChild(el);
+  conversationEl.scrollTop = conversationEl.scrollHeight;
+}
+
+/* ---------------- weather icons mapping ---------------- */
+function getWeatherIcon(cond){
+  const c = (cond||'other').toString().toLowerCase();
+  switch(c){
+    case 'sunny': return '☀️';
+    case 'rainy': return '🌧️';
+    case 'cloudy': return '☁️';
+    case 'windy': return '🌬️';
+    case 'fog': return '🌫️';
+    case 'snowy': return '❄️';
+    case 'drizzle': return '🌦️';
+    case 'thunderstorm': return '⛈️';
+    default: return '🌤️';
+  }
+}
+
+/* ---------------- append helpers (history + DOM) ---------------- */
+function pushUserMessage(text){
+  const msg = { role:'user', content: text };
+  appendToHistory(msg);
+  renderMessage(msg);
+}
+function pushAssistantMessagePartial(textPart, meta){
+  let last = conversationEl.lastElementChild;
+  if (!last || !last.classList.contains('assistant') || last.dataset.streamFinal === "true") {
+    const msgObj = { role:'assistant', content: textPart || '', weather: meta && meta.weather ? meta.weather : null };
+    appendToHistory(msgObj);
+    renderMessage(msgObj);
+    last = conversationEl.lastElementChild;
+    last.dataset.streaming = "true";
+    last.dataset.historyIndex = loadHistory().length - 1;
+    return;
+  } else {
+    const idx = Number(last.dataset.historyIndex);
+    const h = loadHistory();
+    const appended = textPart || '';
+    if (h[idx]) {
+      h[idx].content = (h[idx].content || '') + appended;
+      saveHistory(h);
+    }
+    const inner = last.querySelector('.bubble-text');
+    try {
+      const fullRaw = h[idx] ? h[idx].content : (inner.textContent || '');
+      const cleaned = normalizeMarkdown(fullRaw);
+      const rawHtml = marked.parse(cleaned);
+      const safeHtml = DOMPurify.sanitize(rawHtml);
+      inner.innerHTML = safeHtml;
+    } catch (e) {
+      inner.textContent = inner.textContent + appended;
+    }
+    conversationEl.scrollTop = conversationEl.scrollHeight;
+  }
+}
+function finalizeAssistantStream(){
+  const last = conversationEl.lastElementChild;
+  if (!last || !last.classList.contains('assistant')) return;
+  last.dataset.streamFinal = "true";
+}
+
+/* ---------------- clear chat button ---------------- */
+clearBtn.addEventListener('click', ()=>{ clearHistory(); clearConversationDOM(); showToast('Chat cleared'); statusSmall.textContent = 'Ready'; });
+
+/* ---------------- detect location (reverse geocode via Nominatim) ---------------- */
+locBtn.addEventListener('click', async ()=>{ if (!navigator.geolocation){ showToast('Geolocation not available in this browser',4000); return; } statusSmall.textContent = 'Detecting location...'; showToast('Detecting location...'); navigator.geolocation.getCurrentPosition(async (pos)=>{ const lat = pos.coords.latitude; const lon = pos.coords.longitude; try { const resp = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}`); const j = await resp.json(); const city = j.address.city || j.address.town || j.address.village || j.address.county || j.display_name; if (city) { userInput.value = city; showToast('Detected: ' + city, 3000); statusSmall.textContent = `Detected: ${city}`; } else { showToast('Could not determine city name',4000); statusSmall.textContent = 'Ready'; } } catch (e){ console.error(e); showToast('Reverse geocoding failed',4000); statusSmall.textContent='Ready'; } }, (err)=>{ console.error(err); showToast('Location permission denied or failed',4000); statusSmall.textContent='Ready'; }, {timeout:10000}); });
+
+/* ---------------- STT mic logic (records, uploads to /api/transcribe) ---------------- */
+micBtn.addEventListener('click', async ()=>{ if (!isRecording){ try { statusSmall.textContent = 'Requesting mic permission...'; const stream = await navigator.mediaDevices.getUserMedia({ audio:true }); recordedChunks = []; mediaRecorder = new MediaRecorder(stream); mediaRecorder.ondataavailable = e => { if (e.data && e.data.size>0) recordedChunks.push(e.data); }; mediaRecorder.onstop = async ()=>{ statusSmall.textContent = 'Uploading audio...'; showToast('Uploading audio for transcription...'); const blob = new Blob(recordedChunks, { type: recordedChunks[0]?.type || 'audio/webm' }); const form = new FormData(); form.append('file', blob, 'rec.webm'); form.append('language', sttLang.value || 'auto'); try { const resp = await fetch('/api/transcribe', { method:'POST', body: form }); const j = await resp.json(); if (!resp.ok) { showToast('Transcription failed',4000); console.error(j); statusSmall.textContent = 'Ready'; return; } const text = j.text || j.transcript || ''; userInput.value = text; showToast('Transcription complete'); statusSmall.textContent = 'Transcribed'; } catch(e){ console.error(e); showToast('Upload failed',4000); statusSmall.textContent = 'Ready'; } }; mediaRecorder.start(); isRecording = true; micBtn.classList.add('recording'); statusSmall.textContent = 'Recording... Click mic again to stop'; showToast('Recording started'); } catch(e){ console.error(e); showToast('Mic permission denied',4000); statusSmall.textContent='Ready'; } } else { if (mediaRecorder && mediaRecorder.state === 'recording'){ mediaRecorder.stop(); isRecording = false; micBtn.classList.remove('recording'); statusSmall.textContent = 'Processing transcription...'; showToast('Stopped recording'); try { mediaRecorder.stream.getTracks().forEach(t=>t.stop()); } catch(e){} } } });
+
+/* ---------------- streaming call to /api/stream_process ---------------- */
+async function sendAndStream(text){
+  pushUserMessage(text);
+  userInput.value = '';
+  userInput.focus();
+  statusSmall.textContent = 'Processing...';
+  showToast('Extracting city & fetching weather...');
+  try {
+    const resp = await fetch('/api/stream_process', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ userText: text })
+    });
+    if (!resp.ok){
+      const err = await resp.json().catch(()=>({error:'unknown'}));
+      showToast('Server error — see console',4000); console.error(err);
+      statusSmall.textContent = 'Error';
+      appendAssistantMessage('Server error. See console.');
+      applyBackgroundForCondition('other');
+      return;
+    }
+    const rl = resp.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+    while (true){
+      const { done, value } = await rl.read();
+      if (done) break;
+      buffer += decoder.decode(value, {stream:true});
+      let idx;
+      while ((idx = buffer.indexOf('\n\n')) !== -1){
+        const rawEvent = buffer.slice(0, idx).trim();
+        buffer = buffer.slice(idx + 2);
+        const lines = rawEvent.split('\n').map(s=>s.trim()).filter(Boolean);
+        for (const line of lines){
+          if (!line.startsWith('data:')) continue;
+          const payloadText = line.slice(5).trim();
+          if (!payloadText) continue;
+          let payload;
+          try { payload = JSON.parse(payloadText); } catch(e){ console.error('bad payload', e, payloadText); continue; }
+          if (payload.error){
+            showToast('Server error during stream',4000);
+            console.error(payload);
+            appendAssistantMessage('Error: ' + JSON.stringify(payload));
+            statusSmall.textContent = 'Error';
+            applyBackgroundForCondition('other');
+            return;
+          }
+          if (payload.type === 'meta'){
+            applyBackgroundForCondition(payload.weather && payload.weather.condition);
+            pushAssistantMessagePartial('', {city: payload.city, weather: payload.weather});
+            continue;
+          }
+          if (payload.type === 'chunk'){
+            pushAssistantMessagePartial(payload.text, { });
+            continue;
+          }
+          if (payload.type === 'done'){
+            finalizeAssistantStream();
+            statusSmall.textContent = 'Done';
+            showToast('Answer ready');
+            return;
+          }
+        }
+      }
+    }
+    finalizeAssistantStream();
+    statusSmall.textContent = 'Done';
+  } catch(e){
+    console.error(e); showToast('Stream failed: ' + (e.message||e),4000); statusSmall.textContent = 'Error';
+    appendAssistantMessage('Stream failed: ' + (e.message||e));
+    applyBackgroundForCondition('other');
+  }
+}
+
+/* ---------------- helper: non-stream send for fallback (calls /api/process) ---------------- */
+async function sendOnce(text){
+  pushUserMessage(text);
+  userInput.value = '';
+  userInput.focus();
+  statusSmall.textContent = 'Processing...';
+  showToast('Processing...');
+  try {
+    const resp = await fetch('/api/process', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ userText: text })
+    });
+    const j = await resp.json();
+    if (!resp.ok){
+      showToast('Server error — see console',4000);
+      console.error(j);
+      appendAssistantMessage('Server error. See console.');
+      applyBackgroundForCondition('other');
+      statusSmall.textContent = 'Error';
+      return;
+    }
+    if (j.error){
+      if (j.answer){
+        const msg = { role:'assistant', content: j.answer, weather: j.weather || null };
+        appendToHistory(msg); renderMessage(msg);
+        applyBackgroundForCondition(j.weather && j.weather.condition);
+        statusSmall.textContent = 'Done';
+        return;
+      }
+      appendAssistantMessage(j.message || j.error);
+      applyBackgroundForCondition('other');
+      statusSmall.textContent = 'Done';
+      return;
+    }
+    const msg = { role:'assistant', content: j.answer, weather: j.weather || null };
+    appendToHistory(msg); renderMessage(msg);
+    applyBackgroundForCondition(j.weather && j.weather.condition);
+    statusSmall.textContent = 'Done';
+    showToast('Done');
+  } catch(e){
+    console.error(e); showToast('Request failed',4000); statusSmall.textContent='Error';
+    appendAssistantMessage('Request failed: ' + (e.message||e));
+    applyBackgroundForCondition('other');
+  }
+}
+
+/* ---------------- events ---------------- */
+enterBtn.addEventListener('click', ()=> {
+  const text = userInput.value.trim();
+  if (!text) { showToast('Please enter text or use mic'); return; }
+  sendAndStream(text);
+});
+userInput.addEventListener('keydown', (ev)=> {
+  if (ev.key === 'Enter'){
+    ev.preventDefault();
+    enterBtn.click();
+  }
+});
+
+/* on load: render history (we render but keep UI hidden until intro finishes) */
+renderHistory();
+
+/* ---------------- apply dynamic background (smooth via class swap) ---------------- */
+function applyBackgroundForCondition(cond){
+  const all = ['bg-sunny','bg-rainy','bg-cloudy','bg-windy','bg-fog','bg-snowy','bg-drizzle','bg-thunderstorm','bg-other'];
+  document.body.classList.remove(...all);
+  const mapping = { sunny:'bg-sunny', rainy:'bg-rainy', cloudy:'bg-cloudy', windy:'bg-windy', fog:'bg-fog', snowy:'bg-snowy', drizzle:'bg-drizzle', thunderstorm:'bg-thunderstorm', other:'bg-other' };
+  const cls = mapping[(cond||'other').toString().toLowerCase()] || 'bg-other';
+  document.body.classList.add(cls);
+}
+
+/* Sidebar controls + persistence */
+const sidebar = document.getElementById('sidebar');
+const sidebarOverlay = document.getElementById('sidebarOverlay');
+const sidebarOpenBtn = document.getElementById('sidebarOpenBtn');
+const sidebarClose = document.getElementById('sidebarClose');
+const workflowBtn = document.getElementById('workflowBtn');
+const workflowModal = document.getElementById('workflowModal');
+const workflowClose = document.getElementById('workflowClose');
+
+const SIDEBAR_KEY = 'weatherchat_sidebar_open';
+function isSidebarOpen() { return localStorage.getItem(SIDEBAR_KEY) === '1'; }
+function setSidebarOpen(open) {
+  if (open) {
+    sidebar.classList.add('open');
+    sidebarOverlay.classList.add('show');
+    sidebar.setAttribute('aria-hidden','false');
+    sidebarOverlay.setAttribute('aria-hidden','false');
+  } else {
+    sidebar.classList.remove('open');
+    sidebarOverlay.classList.remove('show');
+    sidebar.setAttribute('aria-hidden','true');
+    sidebarOverlay.setAttribute('aria-hidden','true');
+  }
+  localStorage.setItem(SIDEBAR_KEY, open ? '1' : '0');
+}
+setSidebarOpen(isSidebarOpen());
+sidebarOpenBtn.addEventListener('click', ()=> setSidebarOpen(true));
+sidebarClose.addEventListener('click', ()=> setSidebarOpen(false));
+sidebarOverlay.addEventListener('click', ()=> setSidebarOpen(false));
+function updateFloatingBtnVisibility(){
+  const show = (window.innerWidth <= 880) || !sidebar.classList.contains('open');
+  sidebarOpenBtn.style.display = show ? 'inline-flex' : 'none';
+}
+window.addEventListener('resize', updateFloatingBtnVisibility);
+updateFloatingBtnVisibility();
+workflowBtn.addEventListener('click', ()=> {
+  workflowModal.classList.add('show');
+  workflowModal.setAttribute('aria-hidden','false');
+});
+workflowClose.addEventListener('click', ()=> {
+  workflowModal.classList.remove('show');
+  workflowModal.setAttribute('aria-hidden','true');
+});
+workflowModal.addEventListener('click', (e)=>{
+  if (e.target === workflowModal) {
+    workflowModal.classList.remove('show');
+    workflowModal.setAttribute('aria-hidden','true');
+  }
+});
+
+/* ---------------- initial background ---------------- */
+applyBackgroundForCondition('other');
+
+/* ------------------ INTRO SEQUENCE (slide → typing → reveal) ------------------ */
+(function runIntroSequence(){
+  const intro = document.getElementById('intro');
+  const slide = document.getElementById('introSlide');
+  const content = document.getElementById('introContent');
+  const titleEl = document.getElementById('introTitle');
+  const mainWrap = document.getElementById('mainWrap');
+
+  // configuration
+  const appName = 'WeatherChat';
+  const slideDuration = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--intro-slide-duration')) || 2000;
+  const cps = Number(getComputedStyle(document.documentElement).getPropertyValue('--intro-typing-cps')) || 80;
+  const typingDelayPerChar = 1000 / (cps || 80);
+
+  // Ensure main UI hidden to start
+  mainWrap.classList.add('hidden-onload');
+  mainWrap.setAttribute('aria-hidden','true');
+
+  // helper: promise that resolves on transitionend/animationend (safeguarded with timeout)
+  function waitForTransition(el, propName, timeout = 1500){
+    return new Promise(resolve => {
+      let done = false;
+      function handler(e){
+        if (propName && e.propertyName && e.propertyName !== propName) return;
+        if (done) return;
+        done = true;
+        el.removeEventListener('transitionend', handler);
+        el.removeEventListener('animationend', handler);
+        clearTimeout(timer);
+        resolve();
+      }
+      el.addEventListener('transitionend', handler);
+      el.addEventListener('animationend', handler);
+      const timer = setTimeout(()=> {
+        if (!done) { done = true; try { el.removeEventListener('transitionend', handler); el.removeEventListener('animationend', handler); } catch(e){} resolve(); }
+      }, timeout);
+    });
+  }
+
+  // step 1: animate slide from right -> left (by toggling class)
+  // show content area (text) slightly delayed so it's not visible until the slide begins
+  setTimeout(()=> content.classList.add('show'), 80);
+
+  // start slide
+  requestAnimationFrame(()=>{
+    slide.classList.add('animate');
+  });
+
+  // after slide finishes, play typing
+  waitForTransition(slide, 'transform', slideDuration + 200).then(async ()=>{
+    // small pause so user sees colored bar fully in place
+    await new Promise(r => setTimeout(r, 160));
+
+    // start typing into titleEl
+    titleEl.textContent = '';
+    titleEl.classList.add('caret');
+    // progressively type characters
+    for (let i=0;i<appName.length;i++){
+      titleEl.textContent += appName[i];
+      // small pause per char
+      await new Promise(r => setTimeout(r, typingDelayPerChar));
+    }
+
+    // small pause after typing then reveal main UI
+    await new Promise(r => setTimeout(r, 380));
+
+    // mark intro fadeout and reveal main
+    intro.classList.add('fadeout');
+
+    // reveal main
+    mainWrap.classList.remove('hidden-onload');
+    mainWrap.classList.add('revealed');
+    mainWrap.setAttribute('aria-hidden','false');
+
+    // after fadeout remove intro from DOM (cleanup)
+    waitForTransition(intro, 'opacity', 420).then(()=> {
+      try { intro.remove(); } catch(e){}
+    });
+  });
+})();
+
+/* ----------------- utility stubs used earlier but not defined in snippet ----------------- */
+/* appendAssistantMessage used in error paths earlier */
+function appendAssistantMessage(text){
+  const msg = { role:'assistant', content: String(text || ''), weather: null };
+  appendToHistory(msg); renderMessage(msg);
+}
+
+/* ----------------- RIGHT SIDEBAR LOGIC (login panel) ----------------- */
+const rightSidebar = document.getElementById('rightSidebar');
+const rightSidebarOverlay = document.getElementById('rightSidebarOverlay');
+const loginOpenBtn = document.getElementById('loginOpenBtn');
+const rightSidebarClose = document.getElementById('rightSidebarClose');
+
+function setRightSidebarOpen(open) {
+  if (open) {
+    rightSidebar.classList.add('open');
+    rightSidebarOverlay.classList.add('show');
+    rightSidebar.setAttribute('aria-hidden','false');
+    rightSidebarOverlay.setAttribute('aria-hidden','false');
+  } else {
+    rightSidebar.classList.remove('open');
+    rightSidebarOverlay.classList.remove('show');
+    rightSidebar.setAttribute('aria-hidden','true');
+    rightSidebarOverlay.setAttribute('aria-hidden','true');
+  }
+}
+
+if (loginOpenBtn) loginOpenBtn.addEventListener('click', ()=> setRightSidebarOpen(true));
+if (rightSidebarClose) rightSidebarClose.addEventListener('click', ()=> setRightSidebarOpen(false));
+if (rightSidebarOverlay) rightSidebarOverlay.addEventListener('click', ()=> setRightSidebarOpen(false));
+
+/* optional small handlers for register / google buttons (non-destructive - you can wire them up) */
+const registerBtn = document.getElementById('registerBtn');
+if (registerBtn) registerBtn.addEventListener('click', ()=> { showToast('Register flow not implemented'); });
+
+const googleLoginBtn = document.getElementById('googleLoginBtn');
+if (googleLoginBtn) googleLoginBtn.addEventListener('click', ()=> { showToast('Google sign-in flow not implemented'); });
+
+</script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</body>
+</html>
